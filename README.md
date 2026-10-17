@@ -114,6 +114,21 @@
 - [ ] **Contextual Retrieval**：產生向量前，由 Claude 替每個片段補上它在整份文件中的背景（用 Haiku 5.5，並把整份文件設成 prompt cache）
 - [ ] **比較 embedding 模型**：bge-m3、xVITA-Embed-300M-zhTW（繁中特化，768 維，GGUF）、Qwen3-Embedding-0.6B
 - [ ] **比較建圖譜的模型**：Opus 5.5 vs Sonnet 5.5 vs Haiku 5.5 的圖譜品質與成本
+- [ ] **長上下文 baseline**：把整份知識庫（約 6.5 萬字）放進 Claude 的上下文，並設成 prompt cache 直接回答。用它當作 GraphRAG 分數的參考上限
+
+### 自動分流（Simple ↔ Smart Search）
+
+前置條件：metadata（需要 `status` 偵測已廢止文件）＋評估程式（需要 baseline 才能調整門檻）。
+
+- [ ] **先比較兩種模式**：評估程式分別以「全 Simple」和「全 Smart Search」跑 68 題，比較分數與成本。差距不大就不需要分流
+- [ ] **檢索訊號判斷（免費）**：Simple 的混合搜尋結果出現以下任一情況，就轉給 Smart Search
+  - 最相關片段的分數低於門檻（可能是無答案題，或問法太口語）
+  - 前幾名片段來自 2 份以上文件，且分數接近（可能是跨文件題）
+  - 結果中有 `status: 已廢止` 的文件（版本衝突）
+- [ ] **Cascade 自我評估**：Simple 回答時用結構化輸出多回報 `sufficient: true/false`，`false` 就轉給 Smart Search
+- [ ] **設計原則：寧可多轉也不要漏轉**：複雜題誤送 Simple 會降低品質，簡單題誤送 Smart Search 只是多花成本
+- [ ] **評估分流準確率**：以測試集的 `question_type` 作為標準答案（`single` 應留在 Simple，`multi_doc`／`version_conflict`／`unanswerable` 應轉出），計算漏轉率，並比較三種方式（全 Simple／全 Smart Search／分流）的分數與成本
+- [ ] （備選）**Haiku 5.5 前置分類**：只看問題就分類。看不到檢索結果，所以判斷不出版本衝突，只在上面兩種訊號不夠用時才考慮
 
 ---
 
