@@ -32,6 +32,9 @@ NEO4J_USER = os.getenv("NEO4J_USER", "neo4j")
 NEO4J_PASSWORD = os.getenv("NEO4J_PASSWORD", "graphrag-password")
 NEO4J_DATABASE = os.getenv("NEO4J_DATABASE", "neo4j")
 
+# 檢索時把命中的子塊所屬的父塊（段落全文）一起帶給 LLM（需要用 ingest_chunks.py 建圖）；0 = 只給子塊
+EXPAND_PARENT = os.getenv("EXPAND_PARENT", "1") == "1"
+
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "800"))
 CHUNK_OVERLAP = int(os.getenv("CHUNK_OVERLAP", "100"))
 

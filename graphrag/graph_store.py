@@ -3,8 +3,11 @@
 SimpleKGPipeline 產生的圖譜結構：
   (:Chunk {id, index, text, embedding})-[:FROM_DOCUMENT]->(:Document {path})
   (:Chunk)-[:NEXT_CHUNK]->(:Chunk)
-  (:__Entity__:Person {name, description})-[:FROM_CHUNK]->(:Chunk)
-  (:__Entity__)-[:WORKS_FOR | FOUNDED | ...]->(:__Entity__)
+  （用 ingest_chunks.py 建圖時另有）
+  (:Chunk)-[:CHILD_OF]->(:ParentChunk {id, heading, text})-[:PART_OF]->(:Document)
+  (:Document)-[:REFERENCES | SUPERSEDES]->(:Document)、(:Document 流程圖)-[:FLOWCHART_OF]->(:Document)
+  (:__Entity__:Process {name, description})-[:FROM_CHUNK]->(:Chunk)
+  (:__Entity__)-[:PERFORMED_IN | REQUIRES | GOVERNED_BY | ...]->(:__Entity__)（見 kg_schema.py）
 """
 import re
 from typing import Any
@@ -30,9 +33,11 @@ MAX_ROWS = 50
 # 向量/全文找到 Chunk 後，順著圖譜帶出片段中的實體與它們的關係（GraphRAG 的「Graph」部分）
 CHUNK_RETRIEVAL_QUERY = """
 OPTIONAL MATCH (node)-[:FROM_DOCUMENT]->(d:Document)
+OPTIONAL MATCH (node)-[:CHILD_OF]->(p:ParentChunk)
 OPTIONAL MATCH (e:__Entity__)-[:FROM_CHUNK]->(node)
 OPTIONAL MATCH (e)-[r]-(o:__Entity__)
 RETURN node.id AS chunk_id, d.path AS source, node.text AS text, score,
+       p.id AS parent_id, p.heading AS parent_heading, p.text AS parent_text,
        collect(DISTINCT e.name)[..20] AS entities,
        collect(DISTINCT startNode(r).name + ' -[' + type(r) + ']-> ' + endNode(r).name)[..30] AS relations
 """
@@ -44,7 +49,16 @@ def format_chunk_record(record: neo4j.Record) -> RetrieverResultItem:
         f"片段中的實體：{', '.join(record['entities']) or '（無）'}\n"
         f"相關關係：{'; '.join(record['relations']) or '（無）'}"
     )
-    return RetrieverResultItem(content=content, metadata={"chunk_id": record["chunk_id"], "score": record["score"]})
+    return RetrieverResultItem(
+        content=content,
+        metadata={
+            "chunk_id": record["chunk_id"],
+            "score": record["score"],
+            "parent_id": record["parent_id"],
+            "parent_heading": record["parent_heading"],
+            "parent_text": record["parent_text"],
+        },
+    )
 
 
 def driver() -> neo4j.Driver:
@@ -98,6 +112,9 @@ class GraphStore:
             "Notes:\n"
             "- Every extracted entity also has the label __Entity__ and properties `name`, `description`.\n"
             "- (:__Entity__)-[:FROM_CHUNK]->(:Chunk) links an entity to the text it came from.\n"
+            "- (:Chunk)-[:CHILD_OF]->(:ParentChunk)-[:PART_OF]->(:Document): ParentChunk.text is the full section around a chunk.\n"
+            "- Document nodes with superseded = true are old versions; (:Document)-[:SUPERSEDES]->(old). "
+            "Prefer current documents (superseded IS NULL) when answering.\n"
             "- Never return the `embedding` property."
         )
 
@@ -108,7 +125,16 @@ class GraphStore:
 
     def search_chunks(self, query: str, k: int = 5) -> list[str]:
         result = self.chunk_retriever.search(query_text=query, top_k=k)
-        return [item.content for item in result.items]
+        out, seen = [], set()
+        for item in result.items:
+            text = item.content
+            pid, ptext = item.metadata.get("parent_id"), item.metadata.get("parent_text")
+            # 父子文檔：用子塊比對，再把同一個父塊（所屬段落全文）附上一次，讓 LLM 看到完整脈絡
+            if config.EXPAND_PARENT and pid and ptext and pid not in seen:
+                seen.add(pid)
+                text += f"\n【所屬段落：{item.metadata.get('parent_heading')}】\n{ptext}"
+            out.append(text)
+        return out
 
     def search_entities(self, keyword: str, k: int = 5) -> list[dict]:
         return self._read(
