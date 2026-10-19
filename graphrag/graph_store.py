@@ -18,7 +18,7 @@ from neo4j_graphrag.embeddings import SentenceTransformerEmbeddings
 from neo4j_graphrag.indexes import create_vector_index
 from neo4j_graphrag.retrievers import HybridCypherRetriever
 from neo4j_graphrag.schema import get_schema
-from neo4j_graphrag.types import RetrieverResultItem
+from neo4j_graphrag.types import RetrieverResult, RetrieverResultItem
 
 from . import config
 
@@ -36,7 +36,7 @@ OPTIONAL MATCH (node)-[:FROM_DOCUMENT]->(d:Document)
 OPTIONAL MATCH (node)-[:CHILD_OF]->(p:ParentChunk)
 OPTIONAL MATCH (e:__Entity__)-[:FROM_CHUNK]->(node)
 OPTIONAL MATCH (e)-[r]-(o:__Entity__)
-RETURN node.id AS chunk_id, d.path AS source, node.text AS text, score,
+RETURN node.id AS chunk_id, coalesce(d.doc_id + ' ' + d.title + ' ' + d.version, d.path) AS source, node.text AS text, score,
        p.id AS parent_id, p.heading AS parent_heading, p.text AS parent_text,
        collect(DISTINCT e.name)[..20] AS entities,
        collect(DISTINCT startNode(r).name + ' -[' + type(r) + ']-> ' + endNode(r).name)[..30] AS relations
@@ -59,6 +59,26 @@ def format_chunk_record(record: neo4j.Record) -> RetrieverResultItem:
             "parent_text": record["parent_text"],
         },
     )
+
+
+class ParentExpandingRetriever(HybridCypherRetriever):
+    """父子文檔：用子塊比對，再把同一個父塊（所屬段落全文）附上一次，讓 LLM 看到完整脈絡。
+
+    做在檢索器裡，Smart Search（search_chunks）和 --simple（函式庫的 GraphRAG）才會拿到一樣的內容。
+    """
+
+    def search(self, *args, **kwargs) -> RetrieverResult:
+        result = super().search(*args, **kwargs)
+        if not config.EXPAND_PARENT:
+            return result
+        seen = set()
+        for item in result.items:
+            meta = item.metadata or {}
+            pid, ptext = meta.get("parent_id"), meta.get("parent_text")
+            if pid and ptext and pid not in seen:
+                seen.add(pid)
+                item.content += f"\n【所屬段落：{meta.get('parent_heading')}】\n{ptext}"
+        return result
 
 
 def driver() -> neo4j.Driver:
@@ -91,7 +111,7 @@ class GraphStore:
         self.driver = drv or driver()
         self.embedder = emb or embedder()
         self.db = config.NEO4J_DATABASE
-        self.chunk_retriever = HybridCypherRetriever(
+        self.chunk_retriever = ParentExpandingRetriever(
             self.driver,
             vector_index_name=config.CHUNK_VECTOR_INDEX,
             fulltext_index_name=config.CHUNK_FULLTEXT_INDEX,
@@ -125,16 +145,7 @@ class GraphStore:
 
     def search_chunks(self, query: str, k: int = 5) -> list[str]:
         result = self.chunk_retriever.search(query_text=query, top_k=k)
-        out, seen = [], set()
-        for item in result.items:
-            text = item.content
-            pid, ptext = item.metadata.get("parent_id"), item.metadata.get("parent_text")
-            # 父子文檔：用子塊比對，再把同一個父塊（所屬段落全文）附上一次，讓 LLM 看到完整脈絡
-            if config.EXPAND_PARENT and pid and ptext and pid not in seen:
-                seen.add(pid)
-                text += f"\n【所屬段落：{item.metadata.get('parent_heading')}】\n{ptext}"
-            out.append(text)
-        return out
+        return [item.content for item in result.items]
 
     def search_entities(self, keyword: str, k: int = 5) -> list[dict]:
         return self._read(

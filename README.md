@@ -9,7 +9,7 @@
                   Neo4j 知識圖譜（向量索引 + 全文索引 + 圖結構）
 ```
 
-> 最後更新：2026-10-17
+> 最後更新：2026-10-19
 
 ---
 
@@ -22,8 +22,9 @@
 | 改用 `neo4j-graphrag` 函式庫並修正其 bug | ✅ 完成 |
 | Python 環境與 GPU 加速 | ✅ 完成 |
 | 讀取並分析曦光人壽知識庫 | ✅ 完成 |
-| 針對知識庫調整（切塊、metadata、schema） | ⬜ 待辦 |
-| 評估程式（Golden Set 68 題） | ⬜ 待辦 |
+| 針對知識庫調整（父子切塊、metadata、版本、schema） | ✅ 完成（新版知識庫，62 份） |
+| 新版知識庫的測試集 | ⬜ 待辦（目前沒有） |
+| 評估程式 | ⬜ 待辦（需要測試集） |
 | 端到端實際執行（需 API key + Neo4j） | ⬜ 待辦 |
 | 檢索品質優化 | ⬜ 待辦 |
 
@@ -68,35 +69,59 @@
 - `.venv`：已安裝所有套件，並沿用系統上的 torch。
 - 在 `.venv` 安裝 CUDA 版 torch（`2.10.0+cu128`）。bge-m3 在 RTX 3070 上每秒處理 205 個片段，CPU 只有每秒 8 個，約快 25 倍，顯存峰值約 2.5 GB。
 
-### 5. 知識庫分析（曦光人壽）
+### 5. 知識庫
 
-| 項目 | 內容 |
-|---|---|
-| 文件 | 39 份 Markdown，約 6.5 萬字，每份開頭有 YAML metadata（`doc_id`、`status`、`version`、`superseded_by`…） |
-| 測試集 | `golden_set.jsonl` 共 68 題：單一段落 51、跨文件 7、版本衝突 3、無答案 7；每題附 2 個口語／錯字變體 |
-| 答案位置格式 | `doc_id#章節標題`，例如 `IT-FAQ-001#Q2` |
-| 刻意設計的陷阱 | 已廢止的舊版文件（`IT-FAQ-002-OLD`）、跨文件題、應回答「找不到」的題目 |
+有兩個版本，**之後以新版為準**：
 
-知識庫本身不放在這個 repo，本機位置是 `C:\Users\政德\TAIDE\data\knowledge-base`。
+| | 舊版（模擬資料） | **新版（目前使用）** |
+|---|---|---|
+| 文件 | 39 份 Markdown | 50 份現行文件＋12 張流程圖，從 PDF 轉換 |
+| 版本 | 例如 IT-FAQ-001 v3.2 | 例如 IT-FAQ-001 v4.0；舊版記錄為「被取代」 |
+| 章節格式 | 各文件不同（Q1、第一條…） | 統一為「一、目的／二、依據／三、作業流程 › 3.x／四、控制重點／五、使用表單」 |
+| 測試集 | 68 題 `golden_set.jsonl` | **沒有** |
+| 本機位置 | `C:\Users\政德\TAIDE\data\knowledge-base` | 切好的資料在 `data/chunks_structure_bge-m3/` |
+
+兩個版本的知識庫都不放在這個 repo（已用 `.gitignore` 排除）。
+
+### 6. 父子切塊與新版匯入流程
+
+切塊資料和匯入程式來自另一個工作階段，已整合進本 repo。
+
+- **切塊**（`data/chunks_structure_bge-m3/`）：依文件結構切成子塊和父塊兩層。
+  - 子塊 611 個：用來產生向量、建全文索引、抽取實體。長度依 bge-m3 的實際分詞計算，最多 449 token。
+  - 父塊 191 個：找到子塊後，交給 LLM 閱讀的完整段落。
+  - 每個子塊前面加上位置標頭 `【文件編號 標題 版本｜章節路徑】`。
+- **匯入**（[ingest_chunks.py](ingest_chunks.py)、[graphrag/chunk_loader.py](graphrag/chunk_loader.py)）：把切好的子塊直接交給 `SimpleKGPipeline`，再補上這些關係：
+  - `CHILD_OF`、`PART_OF`：子塊、父塊、文件之間的層級
+  - `SUPERSEDES`：新版取代舊版（38 條）
+  - `REFERENCES`：文件之間的引用（309 條）
+  - `FLOWCHART_OF`：流程圖對應的主文件（12 條）
+- **Schema**（[graphrag/kg_schema.py](graphrag/kg_schema.py)）：改成企業知識庫的領域，共 12 種實體和 14 種關係。
+  - 實體：部門、角色、系統、流程、表單、規定、術語、問題、解法、窗口、專案、經驗教訓
+- **附加父塊**（`ParentExpandingRetriever`）：找到子塊後附上所屬父塊的全文，同一個父塊只附一次；`EXPAND_PARENT=0` 可以關閉。這做在檢索器裡，所以 Smart Search 和 `--simple` 都會拿到父塊。
+- **來源顯示**：檢索結果改成顯示「文件編號＋標題＋版本」，不再只顯示檔案路徑。
+- **答案位置比對**（[graphrag/source_match.py](graphrag/source_match.py)）：給評估程式用，能處理縮寫（`Q2`）和新舊版的編號差異。用舊測試集對新版，可以對上 79/93 個答案位置。
+
+已驗證：
+- 另一個工作階段已把 `--lexical-only` 對本地 Neo4j 5.26.12 ＋ APOC 匯入全部 62 份。
+- 在本機測過：`--dry-run`、新 schema 通過驗證、兩種問答模式都會附加父塊。
+
+**尚未驗證：Claude 抽取實體。**
 
 ---
 
 ## ⬜ 待辦事項
 
-### 優先：讓系統適用於這份知識庫
+### 優先：測試集與評估
 
-- [ ] **排除測試集和 README**：`test-set/` 有標準答案，`README.md` 描述了資料的設計。兩者都不能進入圖譜，否則評估結果失真。
-- [ ] **依章節切塊**：改成依 `##`／`###` 標題切塊，取代每 800 字切一塊。每塊記錄所屬的 `doc_id` 和章節標題，才能對照測試集的 `doc_id#章節`。
-- [ ] **讀取 YAML metadata**：把 `doc_id`、`title`、`status`、`version`、`superseded_by`、`department` 寫入 Document 節點，並在檢索結果中帶出。
-- [ ] **處理已廢止文件**：檢索時優先使用生效中的文件；引用到已廢止的文件時，主動提醒並指向新版。
-- [ ] **改寫 schema**（[graphrag/kg_schema.py](graphrag/kg_schema.py)），換成保險公司的領域：
-  - 實體：部門（含上下層級）、系統、表單、流程（SOP）、術語、縮寫、法規、聯絡窗口
-  - 關係：隸屬、負責、需填表單、使用系統、簽核、縮寫代表、依據法規、新版取代舊版
-- [ ] **評估程式**：用測試集的 68 題計算：
-  - 有沒有找到正確的段落（hit@k）
+- [ ] **新版知識庫的測試集**：目前沒有。有兩種做法：
+  - 等官方或隊友提供
+  - 把舊版 68 題對應到新版：79/93 個答案位置可以自動對上，剩下 14 個（主要是 GLO-001 的術語，新版已經不是獨立標題）要人工對應到子塊編號。答案內容要抽查新版是否改過
+- [ ] **評估程式**：有了測試集後計算：
+  - 有沒有找到正確的段落（hit@k，用 `source_match.py` 比對）
   - 回答是否正確（由 LLM 依標準答案評分）
   - 無答案題是否回答「找不到」
-  - 版本衝突題是否避開廢止文件
+  - 版本衝突題是否避開舊版
   - 口語和錯字變體的表現
   - 並分別比較 Smart Search 和 `--simple` 兩種模式
 
@@ -104,8 +129,10 @@
 
 - [ ] 到 [console.anthropic.com](https://console.anthropic.com) 建立 API key，填入 `.env`
 - [ ] 安裝 Neo4j Desktop，建立資料庫並安裝 APOC 外掛，把密碼填入 `.env`
-- [ ] 建圖譜（預估 Opus 5.5 + `low` 約幾美元到十幾美元，實際以 Console 帳單為準），然後在 Neo4j Browser 檢查圖譜品質
-- [ ] 跑第一次評估，取得 baseline 數字
+- [ ] 先用 `--lexical-only --embed` 匯入：不需要 API key，可以先測試檢索
+- [ ] 用 `--docs` 先對 1～2 份文件執行 Claude 抽取實體，確認圖譜品質和實際費用，再跑全部 62 份
+  - 每個子塊呼叫一次 Claude，共 611 次。如果太貴，可以改成每份文件呼叫一次（約 62 次），再依名稱把實體對應回子塊
+- [ ] 在 Neo4j Browser 檢查圖譜：實體有沒有漏、同一個實體有沒有被拆成好幾個、關係是否正確
 
 ### 檢索品質優化（有 baseline 後逐項比較）
 
@@ -114,17 +141,17 @@
 - [ ] **Contextual Retrieval**：產生向量前，由 Claude 替每個片段補上它在整份文件中的背景（用 Haiku 5.5，並把整份文件設成 prompt cache）
 - [ ] **比較 embedding 模型**：bge-m3、xVITA-Embed-300M-zhTW（繁中特化，768 維，GGUF）、Qwen3-Embedding-0.6B
 - [ ] **比較建圖譜的模型**：Opus 5.5 vs Sonnet 5.5 vs Haiku 5.5 的圖譜品質與成本
-- [ ] **長上下文 baseline**：把整份知識庫（約 6.5 萬字）放進 Claude 的上下文，並設成 prompt cache 直接回答。用它當作 GraphRAG 分數的參考上限
+- [ ] **長上下文 baseline**：把整份知識庫放進 Claude 的上下文，並設成 prompt cache 直接回答。用它當作 GraphRAG 分數的參考上限
 
 ### 自動分流（Simple ↔ Smart Search）
 
-前置條件：metadata（需要 `status` 偵測已廢止文件）＋評估程式（需要 baseline 才能調整門檻）。
+前置條件：metadata（✅ 已完成）＋評估程式（需要測試集與 baseline 才能調整門檻）。
 
-- [ ] **先比較兩種模式**：評估程式分別以「全 Simple」和「全 Smart Search」跑 68 題，比較分數與成本。差距不大就不需要分流
+- [ ] **先比較兩種模式**：評估程式分別以「全 Simple」和「全 Smart Search」跑完測試集，比較分數與成本。差距不大就不需要分流
 - [ ] **檢索訊號判斷（免費）**：Simple 的混合搜尋結果出現以下任一情況，就轉給 Smart Search
   - 最相關片段的分數低於門檻（可能是無答案題，或問法太口語）
   - 前幾名片段來自 2 份以上文件，且分數接近（可能是跨文件題）
-  - 結果中有 `status: 已廢止` 的文件（版本衝突）
+  - 片段內容提到舊版或「已廢止」（新版知識庫的舊版文件不切塊，版本衝突要看內文；例如 IT-FAQ-002 寫明 AuroraLink 已改為 FortiClient）
 - [ ] **Cascade 自我評估**：Simple 回答時用結構化輸出多回報 `sufficient: true/false`，`false` 就轉給 Smart Search
 - [ ] **設計原則：寧可多轉也不要漏轉**：複雜題誤送 Simple 會降低品質，簡單題誤送 Smart Search 只是多花成本
 - [ ] **評估分流準確率**：以測試集的 `question_type` 作為標準答案（`single` 應留在 Simple，`multi_doc`／`version_conflict`／`unanswerable` 應轉出），計算漏轉率，並比較三種方式（全 Simple／全 Smart Search／分流）的分數與成本
@@ -136,15 +163,20 @@
 
 ```
 GraphRAG/
-├── ingest.py              # 建圖譜：SimpleKGPipeline
+├── ingest_chunks.py       # 建圖譜（知識庫用）：切好的父子塊 → SimpleKGPipeline → 補上父子／版本／引用關係
+├── ingest.py              # 建圖譜（一般 .txt/.md）：固定字數切塊
 ├── ask.py                 # 問答 CLI（Smart Search / --simple）
 ├── graphrag/
 │   ├── config.py          # 讀取 .env
 │   ├── llm.py             # ClaudeLLM / FixedOllamaLLM 與模型工廠
-│   ├── graph_store.py     # Neo4j 連線、索引、檢索器
+│   ├── graph_store.py     # Neo4j 連線、索引、檢索器（含附加父塊）
 │   ├── qa.py              # Smart Search agent 與 simple 模式
-│   └── kg_schema.py       # 實體與關係 schema（待改成保險領域）
-├── data/sample.txt        # 範例文件
+│   ├── kg_schema.py       # 實體與關係 schema（企業知識庫）
+│   ├── chunk_loader.py    # 讀取切好的父子塊、補圖譜關係
+│   └── source_match.py    # 評估用：判斷子塊是否命中答案位置
+├── data/
+│   ├── sample.txt                   # 範例文件
+│   └── chunks_structure_bge-m3/     # 新版知識庫的父子塊（不進 git）
 ├── docker-compose.yml     # Neo4j 5.26 + APOC（可選）
 ├── requirements.txt
 └── .env.example           # 設定範本
@@ -165,10 +197,17 @@ pip install --ignore-installed --no-deps torch==2.10.0 --index-url https://downl
 # 3. 設定：複製範本，填入 ANTHROPIC_API_KEY 與 NEO4J_PASSWORD
 copy .env.example .env
 
-# 4. 建圖譜與問答
-python ingest.py data/
-python ask.py "陳怡君的指導教授和星河科技是什麼關係？" -v      # Smart Search
-python ask.py "星河科技的主力產品是什麼？" --simple -v        # 單次檢索
+# 4. 建圖譜（曦光人壽知識庫）
+python ingest_chunks.py data/chunks_structure_bge-m3 --dry-run                   # 只看計畫
+python ingest_chunks.py data/chunks_structure_bge-m3 --lexical-only --embed      # （可選）不呼叫 Claude，先測檢索
+# 跑過 --lexical-only 後，要抽實體前先在 Neo4j Browser 清空：MATCH (n) DETACH DELETE n
+# （已匯入的文件會被略過；用 --force 重寫則會產生重複節點）
+python ingest_chunks.py data/chunks_structure_bge-m3 --docs HR-002 IT-FAQ-002    # 先試 2 份的實體抽取
+python ingest_chunks.py data/chunks_structure_bge-m3                             # 其餘全部（已匯入的會略過）
+
+# 5. 問答
+python ask.py "VPN 權限要怎麼申請？" -v               # Smart Search
+python ask.py "事假一年可以請幾天？" --simple -v      # 單次檢索
 ```
 
 ## 設定（`.env`）
@@ -182,7 +221,8 @@ python ask.py "星河科技的主力產品是什麼？" --simple -v        # 單
 | `EMBED_MODEL` / `EMBED_DIM` / `EMBED_DEVICE` | Embedding 模型、維度、裝置（空白 = 自動偵測 GPU） |
 | `OLLAMA_MODEL` / `OLLAMA_HOST` / `OLLAMA_NUM_CTX` | 本地 Llama 設定 |
 | `NEO4J_*` | Neo4j 連線資訊 |
-| `CHUNK_SIZE` / `CHUNK_OVERLAP` | 切塊大小（改成依章節切塊後會移除） |
+| `EXPAND_PARENT` | `1`（預設）：找到子塊時附上父塊全文；`0`：只回傳子塊 |
+| `CHUNK_SIZE` / `CHUNK_OVERLAP` | 只有 `ingest.py`（一般文件）會用到 |
 
 ### 改用本地 Llama（可選）
 
@@ -197,4 +237,4 @@ ollama cp hf.co/tetf/Llama-3.1-TAIDE-LX-8B-Chat-GGUF:Q4_K_M taide
 
 - **更換 embedding 模型時**：`EMBED_DIM` 要跟著改，並刪除 `chunk_embedding` 索引後重建圖譜。
 - **Cypher 安全**：正式環境建議另外建立唯讀的 Neo4j 帳號給問答使用。
-- **知識庫資料**：曦光人壽知識庫為競賽用的虛構資料，不包含在這個 repo 中。
+- **知識庫資料**：曦光人壽知識庫為競賽用的虛構資料，不包含在這個 repo 中。要重現時，請把 `chunks_structure_bge-m3` 資料夾放到 `data/` 底下。
