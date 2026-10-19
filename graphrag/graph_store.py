@@ -13,7 +13,7 @@ import re
 from typing import Any
 
 import neo4j
-from neo4j import GraphDatabase, Query
+from neo4j import GraphDatabase
 from neo4j_graphrag.embeddings import SentenceTransformerEmbeddings
 from neo4j_graphrag.indexes import create_vector_index
 from neo4j_graphrag.retrievers import HybridCypherRetriever
@@ -36,7 +36,7 @@ OPTIONAL MATCH (node)-[:FROM_DOCUMENT]->(d:Document)
 OPTIONAL MATCH (node)-[:CHILD_OF]->(p:ParentChunk)
 OPTIONAL MATCH (e:__Entity__)-[:FROM_CHUNK]->(node)
 OPTIONAL MATCH (e)-[r]-(o:__Entity__)
-RETURN node.id AS chunk_id, coalesce(d.doc_id + ' ' + d.title + ' ' + d.version, d.path) AS source, node.text AS text, score,
+RETURN node.id AS chunk_id, coalesce(d.doc_id + ' ' + d.title + coalesce(' ' + d.version, ''), d.path) AS source, node.text AS text, score,
        p.id AS parent_id, p.heading AS parent_heading, p.text AS parent_text,
        collect(DISTINCT e.name)[..20] AS entities,
        collect(DISTINCT startNode(r).name + ' -[' + type(r) + ']-> ' + endNode(r).name)[..30] AS relations
@@ -140,8 +140,13 @@ class GraphStore:
 
     # ---------- 檢索 ----------
     def _read(self, cypher: str, **params) -> list[dict]:
+        # 交易函式裡的 tx.run 不接受 Query 物件，timeout 要用 unit_of_work 設定
+        @neo4j.unit_of_work(timeout=15)
+        def work(tx):
+            return tx.run(cypher, **params).data()
+
         with self.driver.session(database=self.db) as s:
-            return s.execute_read(lambda tx: tx.run(Query(cypher, timeout=15), **params).data())
+            return s.execute_read(work)
 
     def search_chunks(self, query: str, k: int = 5) -> list[str]:
         result = self.chunk_retriever.search(query_text=query, top_k=k)

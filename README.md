@@ -25,7 +25,7 @@
 | 針對知識庫調整（父子切塊、metadata、版本、schema） | ✅ 完成（新版知識庫，62 份） |
 | 新版知識庫的測試集 | ⬜ 待辦（目前沒有） |
 | 評估程式 | ⬜ 待辦（需要測試集） |
-| 端到端實際執行（需 API key + Neo4j） | ⬜ 待辦 |
+| 端到端實際執行（需 API key + Neo4j） | 🟡 Neo4j 與檢索已通，待 API key 抽實體與問答 |
 | 檢索品質優化 | ⬜ 待辦 |
 
 ## ✅ 已完成
@@ -79,7 +79,7 @@
 | 版本 | 例如 IT-FAQ-001 v3.2 | 例如 IT-FAQ-001 v4.0；舊版記錄為「被取代」 |
 | 章節格式 | 各文件不同（Q1、第一條…） | 統一為「一、目的／二、依據／三、作業流程 › 3.x／四、控制重點／五、使用表單」 |
 | 測試集 | 68 題 `golden_set.jsonl` | **沒有** |
-| 本機位置 | `C:\Users\政德\TAIDE\data\knowledge-base` | 切好的資料在 `data/chunks_structure_bge-m3/` |
+| 本機位置 | `C:\Users\Ed\TAIDE\data\knowledge-base` | 切好的資料在 `data/chunks_structure_bge-m3/` |
 
 兩個版本的知識庫都不放在這個 repo（已用 `.gitignore` 排除）。
 
@@ -99,14 +99,21 @@
 - **Schema**（[graphrag/kg_schema.py](graphrag/kg_schema.py)）：改成企業知識庫的領域，共 12 種實體和 14 種關係。
   - 實體：部門、角色、系統、流程、表單、規定、術語、問題、解法、窗口、專案、經驗教訓
 - **附加父塊**（`ParentExpandingRetriever`）：找到子塊後附上所屬父塊的全文，同一個父塊只附一次；`EXPAND_PARENT=0` 可以關閉。這做在檢索器裡，所以 Smart Search 和 `--simple` 都會拿到父塊。
-- **來源顯示**：檢索結果改成顯示「文件編號＋標題＋版本」，不再只顯示檔案路徑。
+- **來源顯示**：檢索結果改成顯示「文件編號＋標題＋版本」，不再只顯示檔案路徑。8 份文件沒有版本號（如 SYS-002～005、DOC-003），只顯示編號＋標題。
 - **答案位置比對**（[graphrag/source_match.py](graphrag/source_match.py)）：給評估程式用，能處理縮寫（`Q2`）和新舊版的編號差異。用舊測試集對新版，可以對上 79/93 個答案位置。
 
 已驗證：
 - 另一個工作階段已把 `--lexical-only` 對本地 Neo4j 5.26.12 ＋ APOC 匯入全部 62 份。
 - 在本機測過：`--dry-run`、新 schema 通過驗證、兩種問答模式都會附加父塊。
+- **2026-10-19 本機 Neo4j 2026.09.0 ＋ APOC 實測**：
+  - `--lexical-only --embed` 匯入全部 62 份：611 個子塊、191 個父塊、100 個文件節點（含 38 份被取代的舊版），補上 309 條引用、38 條版本、12 條流程圖關係。
+  - 向量索引、子塊全文索引、實體全文索引都是 ONLINE；混合檢索實測可找到正確段落並附上父塊（例如「VPN 權限要怎麼申請？」第 1 名即為 IT-FAQ-002 Q1）。
+  - 唯讀 Cypher 會擋下寫入語句；`schema_summary()`（APOC）可正常取得圖譜結構。
+- 實測時修正的 bug（[graphrag/graph_store.py](graphrag/graph_store.py)）：
+  - `GraphStore._read` 在交易函式裡把 `Query` 物件傳給 `tx.run`，新版 driver 不接受，Smart Search 的寫 Cypher、搜尋實體、展開關係三個工具都會失敗。改用 `neo4j.unit_of_work(timeout=15)` 設定逾時。
+  - 沒有版本號的文件，來源會因為字串串接遇到 null 而退回顯示檔案路徑。
 
-**尚未驗證：Claude 抽取實體。**
+**尚未驗證：Claude 抽取實體、兩種問答模式的實際回答（需要 API key）。**
 
 ---
 
@@ -127,16 +134,19 @@
 
 ### 端到端執行（需要使用者先準備）
 
-- [ ] 到 [console.anthropic.com](https://console.anthropic.com) 建立 API key，填入 `.env`
-- [ ] 安裝 Neo4j Desktop，建立資料庫並安裝 APOC 外掛，把密碼填入 `.env`
-- [ ] 先用 `--lexical-only --embed` 匯入：不需要 API key，可以先測試檢索
+- [x] 安裝 Neo4j Desktop，建立資料庫並安裝 APOC 外掛，把密碼填入 `.env`（本機為 Neo4j 2026.09.0 ＋ APOC 2026.09.0）
+- [x] 先用 `--lexical-only --embed` 匯入：不需要 API key，可以先測試檢索（2026-10-19 完成，混合檢索已實測）
+- [ ] **下一步**：到 [console.anthropic.com](https://console.anthropic.com) 建立 API key，填入 `.env`（取消 `ANTHROPIC_API_KEY` 那行的註解）
+- [ ] 清空資料庫（`MATCH (n) DETACH DELETE n`）：目前資料庫裡是 `--lexical-only` 的資料，不清空的話抽實體時會跳過所有文件
 - [ ] 用 `--docs` 先對 1～2 份文件執行 Claude 抽取實體，確認圖譜品質和實際費用，再跑全部 62 份
   - 每個子塊呼叫一次 Claude，共 611 次。如果太貴，可以改成每份文件呼叫一次（約 62 次），再依名稱把實體對應回子塊
 - [ ] 在 Neo4j Browser 檢查圖譜：實體有沒有漏、同一個實體有沒有被拆成好幾個、關係是否正確
+- [ ] 實際跑 `ask.py` 的 Smart Search 和 `--simple`，確認兩種模式端到端都正常
 
 ### 檢索品質優化（有 baseline 後逐項比較）
 
-- [ ] **Reranker**：用 `bge-reranker-v2-m3` 從 top-20 精選出 top-5（本地，免費）
+- [ ] **Reranker**：用 `bge-reranker-v2-m3` 從 top-20 精選出 top-5（本地，免費）。實測例子：「事假一年可以請幾天？」的答案（HR-002 3.5 事假）排第 2，第 1 名是 SYS-003 的 FAQ 片段
+- [ ] **Neo4j 2026.x 的棄用警告**：`db.index.vector.queryNodes` 已被標為棄用、建議改用 `SEARCH` 語法。目前仍可正常運作，警告來自 `neo4j-graphrag` 的檢索器；之後升級函式庫或 Neo4j 時要留意
 - [ ] **實體向量**：目前實體只能用關鍵字搜尋。幫實體的名稱和描述產生向量並建立向量索引，就能用語意描述找到實體
 - [ ] **Contextual Retrieval**：產生向量前，由 Claude 替每個片段補上它在整份文件中的背景（用 Haiku 5.5，並把整份文件設成 prompt cache）
 - [ ] **比較 embedding 模型**：bge-m3、xVITA-Embed-300M-zhTW（繁中特化，768 維，GGUF）、Qwen3-Embedding-0.6B
@@ -237,4 +247,5 @@ ollama cp hf.co/tetf/Llama-3.1-TAIDE-LX-8B-Chat-GGUF:Q4_K_M taide
 
 - **更換 embedding 模型時**：`EMBED_DIM` 要跟著改，並刪除 `chunk_embedding` 索引後重建圖譜。
 - **Cypher 安全**：正式環境建議另外建立唯讀的 Neo4j 帳號給問答使用。
+- **Neo4j Desktop 與中文路徑**：Windows 使用者資料夾名稱含中文時，Neo4j 無法啟動（設定檔路徑解析錯誤、啟動指令過長），連帶建立資料庫時設定的密碼也不會生效，帳號會停在預設密碼 `neo4j`。請使用全英文路徑。
 - **知識庫資料**：曦光人壽知識庫為競賽用的虛構資料，不包含在這個 repo 中。要重現時，請把 `chunks_structure_bge-m3` 資料夾放到 `data/` 底下。
