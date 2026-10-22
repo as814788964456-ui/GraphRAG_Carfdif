@@ -159,7 +159,7 @@ class GraphStore:
             OPTIONAL MATCH (node)-[r]-(o:__Entity__)
             WITH node, score, r, o ORDER BY o.name
             RETURN node.name AS name,
-                   [l IN labels(node) WHERE l <> '__Entity__'][0] AS type,
+                   [l IN labels(node) WHERE NOT l IN ['__Entity__', '__KGBuilder__']][0] AS type,
                    node.description AS description, round(score, 3) AS score,
                    collect(startNode(r).name + ' -[' + type(r) + ']-> ' + endNode(r).name)[..20] AS relations
             ORDER BY score DESC

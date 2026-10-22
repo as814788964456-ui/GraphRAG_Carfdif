@@ -1,6 +1,6 @@
 # GraphRAG_Carfdif
 
-以 **Claude + Neo4j 知識圖譜**實作的 GraphRAG 問答系統，目標資料為 Cardif InsurHack 題目 4-1 的虛構保險公司知識庫（曦光人壽）。
+以 **Claude + Neo4j 知識圖譜**實作的 GraphRAG 問答系統，目標資料為 Cardif InsurHack 題目 4-1 的虛構保險公司知識庫（曦光人壽）。另有**全本地版本**（Ollama 上的 2–4B 小模型，不呼叫 Claude API），見「7. 本地 LLM 版本」。
 
 ```
 使用者問題 ─▶ LLM Smart Search（Claude 用工具自主檢索）─▶ LLM 問題 + 相關資訊 ─▶ 加強後的回答
@@ -9,7 +9,7 @@
                   Neo4j 知識圖譜（向量索引 + 全文索引 + 圖結構）
 ```
 
-> 最後更新：2026-10-19
+> 最後更新：2026-10-23
 
 ---
 
@@ -25,7 +25,8 @@
 | 針對知識庫調整（父子切塊、metadata、版本、schema） | ✅ 完成（新版知識庫，62 份） |
 | 新版知識庫的測試集 | ⬜ 待辦（目前沒有） |
 | 評估程式 | ⬜ 待辦（需要測試集） |
-| 端到端實際執行（需 API key + Neo4j） | 🟡 Neo4j 與檢索已通，待 API key 抽實體與問答 |
+| 端到端實際執行（需 API key + Neo4j） | 🟡 Neo4j 與檢索已通，待 API key 抽實體與問答（目前先走本地版本） |
+| 本地 LLM 版本（Ollama，2–4B） | 🟡 問答與抽實體都已實測可用，抽取 prompt 已改善；待跑完全部 62 份 |
 | 檢索品質優化 | ⬜ 待辦 |
 
 ## ✅ 已完成
@@ -115,6 +116,73 @@
 
 **尚未驗證：Claude 抽取實體、兩種問答模式的實際回答（需要 API key）。**
 
+### 7. 本地 LLM 版本（不呼叫 Claude API）
+
+計畫先全部改用本地 2–4B 小模型。Claude 版的檔案都保留不動，本地版是另外的檔案，共用 Neo4j、bge-m3 與檢索器：
+
+| Claude 版 | 本地版 | 說明 |
+|---|---|---|
+| [graphrag/llm.py](graphrag/llm.py) | [graphrag/local_llm.py](graphrag/local_llm.py) | LLM 與設定 |
+| [graphrag/qa.py](graphrag/qa.py) | [graphrag/qa_local.py](graphrag/qa_local.py) | Smart Search 與 `--simple` |
+| [ask.py](ask.py) | [ask_local.py](ask_local.py) | 問答 CLI |
+| [ingest_chunks.py](ingest_chunks.py) | [ingest_chunks_local.py](ingest_chunks_local.py) | 建圖譜（參數相同，只換抽實體的 LLM 與 prompt） |
+| （函式庫預設英文 prompt） | [graphrag/local_kg_prompt.py](graphrag/local_kg_prompt.py) | 給小模型的中文抽取 prompt（規則＋範例） |
+
+- **模型**：預設原版 [Qwen3-4B](https://huggingface.co/Qwen/Qwen3-4B)（思考／不思考可切換，支援工具呼叫），Ollama 標籤 `qwen3:4b-q4_K_M`（2.6 GB，上下文 40K）。
+  - **不要用 `qwen3:4b`**：它現在指向 Qwen3-4B-Thinking-2507（雜湊值和 `qwen3:4b-thinking-2507-q4_K_M` 相同），只會思考，是另一個模型。
+  - 可用 `.env` 的 `LOCAL_EXTRACT_MODEL`、`LOCAL_QA_MODEL` 換成其他模型。注意 Gemma 3 不支援工具呼叫，要用 Gemma 4。
+- **直接呼叫 Ollama REST API**：`neo4j-graphrag` 把 `ollama` 套件限制在 0.5 以下，舊版不能傳 `think` 參數，關不掉 Qwen3 的思考模式。本地版改用 `httpx` 直接呼叫 `/api/chat`，預設 `think=false`。
+- **針對小模型的調整**：
+  - 抽實體時用 JSON schema 限制輸出（Ollama 的 `format`），實體與關係類型只能從 `kg_schema.py` 的清單選，不會自創類型或輸出壞掉的 JSON；`description` 設為必填。
+  - 抽實體改用中文 prompt（[graphrag/local_kg_prompt.py](graphrag/local_kg_prompt.py)），把試抽發現的問題逐條寫成規則，並附 2 個本知識庫的範例（取自 IT-FAQ-001、SYS-002，避開評估用的文件）。比較結果見下方「抽取 prompt 改善」。
+  - **防止卡住**：temperature 0 時小模型偶爾會重複輸出停不下來（實測有一個子塊超過 300 秒逾時，整批中斷）。現在每次最多輸出 2048 token（`LOCAL_NUM_PREDICT`），被截斷的 JSON 用 `json_repair` 補齊；抽實體逾時或出錯時回傳空圖並記錄警告，不會中斷整批匯入（問答仍會報錯）。
+  - Smart Search 第一步固定先用使用者問題做一次混合搜尋，小模型常常不呼叫工具就直接回答。
+  - 圖譜結構改用手寫的精簡版放進 system prompt，不用 APOC 產生的完整 schema。
+  - 每次工具回傳最多 6000 字（`LOCAL_TOOL_MAX_CHARS`），最多 6 輪工具呼叫（`LOCAL_AGENT_MAX_STEPS`）；上下文預設 16384（`LOCAL_NUM_CTX`）。
+- **顯存**：RTX 3070 8 GB。4B 量化模型約 3 GB，加上 bge-m3 約 2.5 GB，放得下。
+- **已驗證（離線）**：用假的 Ollama 回應測過抽實體的 schema 與 `think=false`、一般呼叫、Smart Search 的工具迴圈（自動先搜尋、再查一次、截斷、未知工具、步數上限），以及 `ingest_chunks_local.py --dry-run`。
+- **已驗證（真模型，2026-10-23，Ollama 0.40.8 ＋ `qwen3:4b-q4_K_M`）**：
+  - `think=false` 有效；載入後一般回答約 3 秒（第一次載入模型約 70 秒）。顯存佔用 5.2 GB（上下文 16384）。
+  - 工具呼叫正常：問「VPN 權限要怎麼申請？」會呼叫 `search_entities(keyword="VPN 權限申請")`。
+  - 抽實體：每個子塊 4–6 秒（611 個子塊估計約 50 分鐘）。例如 IT-FAQ-002 Q1 抽出資訊安全科、eFlow、IT-02 申請單、VPN 權限申請流程。
+  - 小模型常把**關係方向抽反**（例如 eFlow -[PERFORMED_IN]-> 流程），也會把文件編號當成術語。函式庫的圖譜修剪（`GraphPruning`）會把反向但符合 schema 的關係翻正，刪掉不符合 schema 的關係，實測修剪後 3 條關係都正確。
+  - 待觀察：實體的 `description` 常是空的；一般對話偶爾夾雜簡體字。
+  - **問答（`ask_local.py`，資料庫為 `--lexical-only` 的資料，還沒有實體）**：5 題全部答對。
+    - `--simple`：「VPN 權限要怎麼申請？」答出 eFlow、IT-02、簽核流程與開通時間；「事假一年可以請幾天？」答 14 天。
+    - Smart Search：上面兩題加上「員工請假要在哪個系統申請？要誰核准？」（答 HR Portal、直屬主管，3 天以上加處級主管），都有標註 `[chunk_id]`。三題第一次自動搜尋就足夠，模型沒有再呼叫工具。
+    - 每題約 32–35 秒，大部分是每次啟動都要重新載入 bge-m3 和模型；互動模式（`python ask_local.py` 不帶問題）只會載入一次。
+  - **試抽 2 份（`ingest_chunks_local.py --docs HR-002 IT-FAQ-002`）**：含 HR-002 流程圖共 3 份、32 個子塊，3.3 分鐘（平均每子塊約 4.5 秒，全部 611 個估計 45–60 分鐘）。
+    - 每個子塊都有抽到實體。共 139 個實體、67 條實體關係；類型以 Rule（46）、Form（23）、Process（15）、System（13）為主。
+    - 抽對的例子：`請假 -[PERFORMED_IN]-> HR Portal`、`VPN 權限申請流程 -[REQUIRES]-> IT-02 申請單`、`VPN 連不上 -[ESCALATE_TO]-> 分機 5000`。
+    - 問題：
+      - 49% 的實體沒有任何實體關係（68/139），只透過 `FROM_CHUNK` 連到子塊。
+      - 38% 的實體沒有描述（53/139）。
+      - 同名實體被抽成不同類型，合併不起來：VPN（System／Term）、人力資源處（Department／Contact）。
+      - 部分關係語意錯誤：`直屬主管 -[BELONGS_TO]-> 人力資源處`；規定被當成問題（Issue），`RESOLVED_BY` 指向同一句話的改寫。
+    - `search_entities`、`expand_entity` 在真實圖譜上可以用。
+  - 實測時修正的 bug（[graphrag/graph_store.py](graphrag/graph_store.py)）：`search_entities` 回傳的實體類型都是 `__KGBuilder__`（只排除了 `__Entity__` 標籤），已改成兩個都排除。Claude 版也共用這段。
+
+#### 抽取 prompt 改善（2026-10-23）
+
+同樣 32 個子塊（HR-002、IT-FAQ-002、HR-002 流程圖），只在記憶體中抽取＋修剪、依「類型＋名稱」合併後比較，不寫入資料庫：
+
+| 指標 | 舊版（函式庫預設英文 prompt、描述選填） | 新版（中文規則＋範例、描述必填） |
+|---|---|---|
+| 實體 | 122 | 146 |
+| 實體關係（修剪後） | 58 | **84**（+45%） |
+| 孤立實體 | 72（59%） | 67（**46%**） |
+| 沒有描述 | 58（48%） | **0（0%）** |
+| 文件編號被當成實體 | 9 個 | 4 個 |
+| 修剪刪掉的關係 | 102/161（63%） | 91/176（52%） |
+| Issue／Solution | 2／2 | 10／3 |
+| 同名不同類型 | 3 組 | 5 組（VPN、AuroraLink 仍是 System／Term） |
+| 耗時 | 142 秒 | 172 秒（prompt 較長，+20%） |
+
+- 新版抽對的例子：`產檢假申請 -[ESCALATE_TO]-> 人資薪酬組分機 2100`、`境外連線申請 -[PERFORMED_IN]-> iService`、`VPN 遠端連線申請 -[PERFORMED_IN]-> FortiClient VPN`、`薪酬組 -[RESPONSIBLE_FOR]-> 留職停薪申請`。
+- 仍有錯誤：`申請人 -[APPROVES]-> VPN 權限申請流程`（申請人不是核准者）、`人力資源處` 有時被當成 Role。
+- 結論：新版關係多、描述完整、雜訊少，`ingest_chunks_local.py` 已改用新版。孤立實體與同名不同類型還需要後處理（見待辦）。
+- 注意：目前資料庫裡的 3 份文件是**舊版 prompt** 試抽的結果，跑完整匯入前要先清空。
+
 ---
 
 ## ⬜ 待辦事項
@@ -132,7 +200,23 @@
   - 口語和錯字變體的表現
   - 並分別比較 Smart Search 和 `--simple` 兩種模式
 
-### 端到端執行（需要使用者先準備）
+### 本地 LLM 版本（目前優先）
+
+- [x] 安裝 Ollama，下載模型：`ollama pull qwen3:4b-q4_K_M`（2026-10-23，Ollama 0.40.8）
+- [x] 清空資料庫，用 `ingest_chunks_local.py --docs HR-002 IT-FAQ-002` 先試 2 份（結果見上方「7. 本地 LLM 版本」）
+- [x] 改善抽取 prompt：中文規則＋範例＋描述必填（關係 +45%、描述 100%，見「抽取 prompt 改善」）
+- [x] 防止小模型重複輸出卡住：輸出上限、JSON 修補、失敗回傳空圖
+- [ ] **下一步**：清空資料庫（目前是舊版 prompt 試抽的 3 份），用新版跑完全部 62 份（611 個子塊，估計 55–70 分鐘）
+- [ ] 抽取後處理：
+  - 依名稱合併同名不同類型的實體（例如 VPN、AuroraLink 的 System／Term）
+  - 孤立實體仍有 46%：考慮刪掉沒有任何關係、名稱又是長句的 Rule，或保留（它們仍連到子塊、可被 `search_entities` 找到）
+- [ ] 比較其他 2–4B 模型的抽取品質
+- [x] 用 `ask_local.py` 實測 Smart Search 和 `--simple`（`--lexical-only` 資料，5 題全對）
+- [ ] 有實體之後再測一次 `ask_local.py`，看模型會不會用到 `search_entities`／`expand_entity`，以及問「找不到」的題目
+- [ ] 比較 2B 與 4B（以及其他 2–4B 模型）的抽取品質、回答品質與速度
+- [ ] 調整取樣參數：目前 `temperature=0`。Qwen 官方建議不思考模式用 temperature 0.7、top_p 0.8、top_k 20，並提醒貪婪解碼（temperature 0）可能出現重複輸出；實測若有重複再調整
+
+### 端到端執行（Claude 版，需要使用者先準備）
 
 - [x] 安裝 Neo4j Desktop，建立資料庫並安裝 APOC 外掛，把密碼填入 `.env`（本機為 Neo4j 2026.09.0 ＋ APOC 2026.09.0）
 - [x] 先用 `--lexical-only --embed` 匯入：不需要 API key，可以先測試檢索（2026-10-19 完成，混合檢索已實測）
@@ -174,13 +258,18 @@
 ```
 GraphRAG/
 ├── ingest_chunks.py       # 建圖譜（知識庫用）：切好的父子塊 → SimpleKGPipeline → 補上父子／版本／引用關係
+├── ingest_chunks_local.py # 同上，抽實體改用本地 LLM
 ├── ingest.py              # 建圖譜（一般 .txt/.md）：固定字數切塊
 ├── ask.py                 # 問答 CLI（Smart Search / --simple）
+├── ask_local.py           # 問答 CLI，本地 LLM 版
 ├── graphrag/
 │   ├── config.py          # 讀取 .env
 │   ├── llm.py             # ClaudeLLM / FixedOllamaLLM 與模型工廠
+│   ├── local_llm.py       # 本地 LLM（Ollama REST API）與設定
 │   ├── graph_store.py     # Neo4j 連線、索引、檢索器（含附加父塊）
 │   ├── qa.py              # Smart Search agent 與 simple 模式
+│   ├── qa_local.py        # 同上，本地 LLM 版
+│   ├── local_kg_prompt.py # 本地小模型用的中文抽取 prompt（規則＋範例）
 │   ├── kg_schema.py       # 實體與關係 schema（企業知識庫）
 │   ├── chunk_loader.py    # 讀取切好的父子塊、補圖譜關係
 │   └── source_match.py    # 評估用：判斷子塊是否命中答案位置
@@ -220,6 +309,16 @@ python ask.py "VPN 權限要怎麼申請？" -v               # Smart Search
 python ask.py "事假一年可以請幾天？" --simple -v      # 單次檢索
 ```
 
+### 全本地版本（不需要 API key）
+
+```powershell
+ollama pull qwen3:4b-q4_K_M
+python ingest_chunks_local.py data/chunks_structure_bge-m3 --docs HR-002 IT-FAQ-002   # 先試 2 份
+python ingest_chunks_local.py data/chunks_structure_bge-m3                            # 其餘全部
+python ask_local.py "VPN 權限要怎麼申請？" -v               # Smart Search（本地模型）
+python ask_local.py "事假一年可以請幾天？" --simple -v      # 單次檢索（本地模型）
+```
+
 ## 設定（`.env`）
 
 | 變數 | 說明 |
@@ -229,7 +328,10 @@ python ask.py "事假一年可以請幾天？" --simple -v      # 單次檢索
 | `QA_MODEL` / `QA_EFFORT` | Smart Search 的模型與 effort |
 | `SIMPLE_QA_MODEL` / `SIMPLE_QA_EFFORT` | `--simple` 的模型與 effort |
 | `EMBED_MODEL` / `EMBED_DIM` / `EMBED_DEVICE` | Embedding 模型、維度、裝置（空白 = 自動偵測 GPU） |
-| `OLLAMA_MODEL` / `OLLAMA_HOST` / `OLLAMA_NUM_CTX` | 本地 Llama 設定 |
+| `OLLAMA_MODEL` / `OLLAMA_HOST` / `OLLAMA_NUM_CTX` | 本地 Llama 設定（Claude 版檔案的 `ollama` provider 用） |
+| `LOCAL_EXTRACT_MODEL` / `LOCAL_QA_MODEL` | 本地版（`*_local.py`）建圖譜與問答的模型，預設 `qwen3:4b-q4_K_M`（原版 Qwen3-4B） |
+| `LOCAL_NUM_CTX` / `LOCAL_THINK` / `LOCAL_AGENT_MAX_STEPS` / `LOCAL_TOOL_MAX_CHARS` | 本地版的上下文長度、思考開關、工具呼叫輪數與回傳長度上限 |
+| `LOCAL_NUM_PREDICT` / `LOCAL_TIMEOUT` | 本地版單次最多輸出幾個 token（預設 2048）、單次請求逾時秒數（預設 300） |
 | `NEO4J_*` | Neo4j 連線資訊 |
 | `EXPAND_PARENT` | `1`（預設）：找到子塊時附上父塊全文；`0`：只回傳子塊 |
 | `CHUNK_SIZE` / `CHUNK_OVERLAP` | 只有 `ingest.py`（一般文件）會用到 |
