@@ -26,7 +26,7 @@
 | 新版知識庫的測試集 | ⬜ 待辦（目前沒有） |
 | 評估程式 | ⬜ 待辦（需要測試集） |
 | 端到端實際執行（需 API key + Neo4j） | 🟡 Neo4j 與檢索已通，待 API key 抽實體與問答（目前先走本地版本） |
-| 本地 LLM 版本（Ollama，2–4B） | 🟡 問答與抽實體都已實測可用，抽取 prompt 已改善；待跑完全部 62 份 |
+| 本地 LLM 版本（Ollama，2–4B） | 🟡 全部 62 份已用本地模型建好圖譜；問答可用，但 Smart Search 會在無答案題編造答案 |
 | 檢索品質優化 | ⬜ 待辦 |
 
 ## ✅ 已完成
@@ -181,7 +181,36 @@
 - 新版抽對的例子：`產檢假申請 -[ESCALATE_TO]-> 人資薪酬組分機 2100`、`境外連線申請 -[PERFORMED_IN]-> iService`、`VPN 遠端連線申請 -[PERFORMED_IN]-> FortiClient VPN`、`薪酬組 -[RESPONSIBLE_FOR]-> 留職停薪申請`。
 - 仍有錯誤：`申請人 -[APPROVES]-> VPN 權限申請流程`（申請人不是核准者）、`人力資源處` 有時被當成 Role。
 - 結論：新版關係多、描述完整、雜訊少，`ingest_chunks_local.py` 已改用新版。孤立實體與同名不同類型還需要後處理（見待辦）。
-- 注意：目前資料庫裡的 3 份文件是**舊版 prompt** 試抽的結果，跑完整匯入前要先清空。
+
+目前資料庫是下面「完整匯入」的結果（新版 prompt，全部 62 份）。
+#### 完整匯入（2026-10-23，新版 prompt，全部 62 份）
+
+`ingest_chunks_local.py data/chunks_structure_bge-m3`，611 個子塊，**66 分鐘**跑完，沒有中斷。
+
+- 防護機制實際用上：6 個子塊重複輸出到 2048 token 上限被截斷，5 個補齊 JSON 後保留了已抽到的實體，1 個仍無法解析（`OPS-INT-002-P01-C03` 沒有實體）。沒有逾時。
+- 圖譜：**2714 個實體、1681 條實體關係**，另有 611 個子塊、191 個父塊、100 個文件節點。
+  - 實體類型：Rule 810、Term 544、Process 444、Form 175、System 162、Issue 152、Department 144、Role 91、Contact 82、Solution 72、Project 19、Lesson 19。
+  - 關係：RESPONSIBLE_FOR 291、GOVERNED_BY 278、PERFORMED_IN 216、REFERS_TO 186、APPLIES_TO 156、BELONGS_TO 131、APPROVES 113、PRECEDES 96、REQUIRES 76、RESOLVED_BY 62、ESCALATE_TO 44、AFFECTS 22、LEARNED 9、DELIVERED 2。
+  - 連結最多的實體：人力資源處（74）、eFlow（70）、總務處（65）、iService（47）、直屬主管（44）、LIFE-Core（38）。
+- 品質：
+  - 描述 100% 都有；同名同類型的實體都有合併。
+  - 孤立實體 45%（1215/2714）。
+  - **同名不同類型 169 組**，常見系統也有：Teams、iService、LIFE-Core、VPN、AuroraLink 都同時是 System 和 Term。
+  - 仍有錯誤類型，例如「文件編號規則」被當成 System。
+
+#### 完整圖譜上的問答（`qwen3:4b-q4_K_M`，同一個程式連續問，每題 4–11 秒）
+
+| 類型 | 問題 | Smart Search | `--simple` |
+|---|---|---|---|
+| 單一事實 | VPN 權限要怎麼申請？ | ✅ eFlow 填 IT-02、簽核流程、開通時間 | |
+| 單一事實 | 事假一年可以請幾天？ | ✅ 14 天 | |
+| 圖譜彙總 | eFlow 由哪個部門負責？哪些流程要在 eFlow 辦理？ | ⚠️ 列出一長串流程，混入不相關項目，負責部門不精確 | |
+| 圖譜彙總 | 人力資源處負責哪些流程？ | ✅ 8 項，大致正確並標註出處 | |
+| 版本衝突 | 公司的 VPN 連線軟體是哪一個？ | ✅ FortiClient VPN（沒有答舊版的 AuroraLink） | ✅ |
+| 無答案 | 公司今年的尾牙在哪裡舉辦？ | ❌ **編造**：把 GEN-001 的公司大樓地址當成尾牙地點 | ✅ 找不到 |
+
+- **模型沒有主動呼叫任何工具**：6 題都只用了第一步自動搜尋的結果，沒有用 `search_entities`、`expand_entity`、`run_cypher`。圖譜資訊只透過搜尋結果附帶的「片段中的實體／相關關係」間接用到。
+- Smart Search 的工具迴圈對 4B 模型幫助有限；`--simple` 在無答案題反而比較保守。
 
 ---
 
@@ -206,13 +235,18 @@
 - [x] 清空資料庫，用 `ingest_chunks_local.py --docs HR-002 IT-FAQ-002` 先試 2 份（結果見上方「7. 本地 LLM 版本」）
 - [x] 改善抽取 prompt：中文規則＋範例＋描述必填（關係 +45%、描述 100%，見「抽取 prompt 改善」）
 - [x] 防止小模型重複輸出卡住：輸出上限、JSON 修補、失敗回傳空圖
-- [ ] **下一步**：清空資料庫（目前是舊版 prompt 試抽的 3 份），用新版跑完全部 62 份（611 個子塊，估計 55–70 分鐘）
+- [x] 用新版 prompt 跑完全部 62 份（66 分鐘，2714 個實體、1681 條關係，見「完整匯入」）
+- [x] 用 `ask_local.py` 實測 Smart Search 和 `--simple`（`--lexical-only` 資料 5 題全對；完整圖譜 6 題，見上方表格）
+- [ ] **下一步：修正 Smart Search 在無答案題編造答案**。可能做法：
+  - system prompt 加強「查到的內容沒有直接回答問題就說找不到」，並給一個反例（只查到地址、沒有提到尾牙）
+  - 回答前再問一次模型「上面的內容有沒有直接回答這個問題」（是／否），否就回答找不到
+  - 改成預設用 `--simple`，Smart Search 只在需要時使用
+  - 要用測試集評估，不要只針對這一題調整
+- [ ] 讓小模型真的用到圖譜工具：目前 6 題都沒有主動呼叫工具。可以試著把 `search_entities` 也放進第一步自動執行，或在彙總類問題（「哪些」「負責」）自動加上 `expand_entity`
 - [ ] 抽取後處理：
-  - 依名稱合併同名不同類型的實體（例如 VPN、AuroraLink 的 System／Term）
-  - 孤立實體仍有 46%：考慮刪掉沒有任何關係、名稱又是長句的 Rule，或保留（它們仍連到子塊、可被 `search_entities` 找到）
+  - 依名稱合併同名不同類型的實體（169 組，例如 Teams、iService、LIFE-Core、VPN、AuroraLink 的 System／Term）
+  - 孤立實體 45%：考慮刪掉沒有任何關係、名稱又是長句的 Rule，或保留（它們仍連到子塊、可被 `search_entities` 找到）
 - [ ] 比較其他 2–4B 模型的抽取品質
-- [x] 用 `ask_local.py` 實測 Smart Search 和 `--simple`（`--lexical-only` 資料，5 題全對）
-- [ ] 有實體之後再測一次 `ask_local.py`，看模型會不會用到 `search_entities`／`expand_entity`，以及問「找不到」的題目
 - [ ] 比較 2B 與 4B（以及其他 2–4B 模型）的抽取品質、回答品質與速度
 - [ ] 調整取樣參數：目前 `temperature=0`。Qwen 官方建議不思考模式用 temperature 0.7、top_p 0.8、top_k 20，並提醒貪婪解碼（temperature 0）可能出現重複輸出；實測若有重複再調整
 
